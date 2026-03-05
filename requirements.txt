@@ -1,10 +1,25 @@
+# ==========================================
+# 硬件数据手册阅读 Agent 依赖库
+# ==========================================
+
+# ---------- 核心 AI 与 LangChain 框架 ----------
 langchain
 langchain-openai
 langchain-community
-pymupdf
-python-docx
-chromadb
-sentence-transformers
-openpyxl
-pyyaml
-tqdm
+
+# ---------- 文档解析与加载 ----------
+pymupdf                # PDF 文档加载 (PyMuPDF)
+python-docx            # Word 文档加载与生成
+
+# ---------- 数据处理与表格生成 ----------
+pandas                 # 数据处理 (为 Excel 输出做准备)
+openpyxl               # Excel 文件读写
+
+# ---------- 配置、日志与工具 ----------
+pyyaml                 # YAML 配置文件解析
+tqdm                   # 进度条可视化
+
+# ---------- 未来拓展：向量数据库与 RAG ----------
+# (当前版本暂未启用，如需开发智能检索功能可取消注释)
+# chromadb
+# sentence-transformers
