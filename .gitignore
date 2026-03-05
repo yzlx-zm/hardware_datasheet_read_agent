@@ -1,6 +1,7 @@
 # 1. 核心：私密配置文件，绝对禁止上传
 config.yaml
-
+# 输入文档目录（私密手册不上传Git）
+input_docs/
 # 2. Python 缓存文件
 __pycache__/
 *.py[cod]

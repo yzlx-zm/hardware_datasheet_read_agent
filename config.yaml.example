@@ -4,7 +4,7 @@
 # 1. AI 模型配置
 llm:
   # 你的 DeepSeek API Key (从 platform.deepseek.com 获取)
-  api_key: "sk-这里填你的Key，不要填在这个example文件里"
+  api_key: "sk-xxxxxx"
   # 模型名称，默认 deepseek-chat 即可
   model_name: "deepseek-chat"
   # API 地址
@@ -14,12 +14,30 @@ llm:
 
 # 2. 文档处理配置
 document:
-  # 要处理的硬件文档文件名 (放在项目根目录下)
+  # 文档存放根目录
+  input_dir: "input_docs"
+  # 默认要处理的文档文件名（支持相对input_dir的路径/绝对路径）
   input_file: "test.pdf"
-  # 生成的归档文档文件名
-  output_file: "3D人脸识别模组_通信协议归档文档.md"
+  # 生成的归档文档主文件名 (不含后缀)
+  # ✅ 留空则自动根据输入文件名生成，格式：[输入文件名主体]_通信协议归档
+  # ✅ 手动填写则固定使用该名称，优先级最高
+  output_base_name: ""
+  # 输出格式列表：可多选 ["markdown", "word", "excel"]
+  output_formats:
+    - "markdown"
+    - "word"
+    - "excel"
 
-# 3. 日志配置
+
+# 3. 归档配置
+archive:
+  # 是否按时间戳创建子文件夹
+  use_timestamp_folder:
+    true
+    # 归档文件根目录
+  archive_root_dir: "output_archive"
+
+# 4. 日志配置
 logging:
   # 日志级别: DEBUG, INFO, WARNING, ERROR
   level: "INFO"

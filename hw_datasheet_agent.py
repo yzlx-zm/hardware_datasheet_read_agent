@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import logging
+import argparse
 from datetime import datetime
 from tqdm import tqdm
 import yaml
@@ -11,6 +12,21 @@ from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, 
 from langchain_openai import ChatOpenAI
 
 # ================= 全局初始化 =================
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='硬件数据手册解析归档 Agent')
+    parser.add_argument(
+        '-f', '--file', 
+        type=str, 
+        help='指定要解析的文档文件（支持相对input_dir的路径/绝对路径），优先级高于配置文件'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        help='指定输出文档的基础名称（不含后缀），优先级高于配置文件'
+    )
+    return parser.parse_args()
+
 def setup_logging(config):
     """配置日志系统"""
     log_dir = config['logging']['log_dir']
@@ -43,7 +59,7 @@ def load_config(config_path="config.yaml"):
             print(f"❌ 配置文件格式错误: {e}")
             sys.exit(1)
 
-# ================= 新增：智能文档加载器 =================
+# ================= 智能文档加载器 =================
 def load_document_smart(file_path, logger):
     """根据文件后缀智能选择加载器"""
     if not os.path.exists(file_path):
@@ -63,10 +79,9 @@ def load_document_smart(file_path, logger):
         return None
 
     try:
-        logger.info(f"正在加载 {ext.upper()} 文档...")
+        logger.info(f"正在加载 {ext.upper()} 文档: {os.path.basename(file_path)}")
         loader_class = loader_map[ext]
         
-        # TextLoader需要指定编码
         if ext == '.txt':
             loader = loader_class(file_path, encoding='utf-8')
         else:
@@ -80,10 +95,9 @@ def load_document_smart(file_path, logger):
         logger.error(f"加载文档失败: {str(e)}", exc_info=True)
         return None
 
-# ================= 新增：多格式归档保存器 =================
+# ================= 多格式归档保存器 =================
 def save_archive_multi_format(content, base_name, config, logger):
     """保存为 Markdown/Word/Excel 多种格式"""
-    # 1. 准备归档目录
     archive_root = config['archive'].get('archive_root_dir', 'output_archive')
     if config['archive'].get('use_timestamp_folder', True):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -97,7 +111,7 @@ def save_archive_multi_format(content, base_name, config, logger):
     saved_files = []
     formats = config['document'].get('output_formats', ['markdown'])
 
-    # --- 2. 保存 Markdown ---
+    # 保存 Markdown
     if "markdown" in formats:
         md_path = os.path.join(target_dir, f"{base_name}.md")
         try:
@@ -108,19 +122,16 @@ def save_archive_multi_format(content, base_name, config, logger):
         except Exception as e:
             logger.error(f"保存 Markdown 失败: {e}")
 
-    # --- 3. 保存 Word (.docx) ---
+    # 保存 Word (.docx)
     if "word" in formats:
         docx_path = os.path.join(target_dir, f"{base_name}.docx")
         try:
             from docx import Document
-            from docx.shared import Pt
             doc = Document()
             
-            # 简单的样式设置
             title = doc.add_heading(base_name, 0)
-            title.alignment = 1  # 居中
+            title.alignment = 1
             
-            # 按行处理内容，简单转换 (实际项目可使用 markdown2docx 库做完美转换)
             for line in content.split('\n'):
                 if line.startswith('# '):
                     doc.add_heading(line[2:], level=1)
@@ -142,20 +153,20 @@ def save_archive_multi_format(content, base_name, config, logger):
         except Exception as e:
             logger.error(f"保存 Word 失败: {e}")
 
-    # --- 4. 保存 Excel (仅提取指令集和错误码表，后续可扩展) ---
+    # 保存 Excel
     if "excel" in formats:
         xlsx_path = os.path.join(target_dir, f"{base_name}_指令集_错误码.xlsx")
         try:
             import pandas as pd
             
-            # 创建一个Excel Writer
             with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
-                # Sheet1: 说明
-                df_info = pd.DataFrame({'说明': ['本文件由硬件文档Agent自动生成', f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}']})
+                df_info = pd.DataFrame({'说明': [
+                    '本文件由硬件文档Agent自动生成', 
+                    f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                    f'源文档: {base_name}'
+                ]})
                 df_info.to_excel(writer, sheet_name='说明', index=False)
                 
-                # 这里可以通过正则或让AI返回JSON来提取表格
-                # 为了演示稳定性，这里先留空Sheet，后续我们可以专门优化AI返回结构化数据
                 df_placeholder = pd.DataFrame({'提示': ['完整的指令集和错误码表格提取功能开发中，敬请期待']})
                 df_placeholder.to_excel(writer, sheet_name='指令集与错误码', index=False)
             
@@ -169,23 +180,21 @@ def save_archive_multi_format(content, base_name, config, logger):
     return saved_files
 
 # ================= 核心业务逻辑 =================
-def process_document(config, logger):
+def process_document(config, input_file_path, output_base_name, logger):
     """主处理流程"""
     start_time = time.time()
-    input_path = config['document']['input_file']
-    output_base_name = config['document']['output_base_name']
 
     try:
         with tqdm(total=100, desc="整体进度", bar_format='{l_bar}{bar}| {n_fmt}%') as pbar:
             
-            # --- 1.1 智能加载文档 ---
+            # 1. 智能加载文档
             pbar.set_description("正在读取文档")
-            full_doc_text = load_document_smart(input_path, logger)
+            full_doc_text = load_document_smart(input_file_path, logger)
             if full_doc_text is None:
                 return False
             pbar.update(30)
 
-            # --- 1.2 初始化 LLM ---
+            # 2. 初始化 LLM
             pbar.set_description("正在初始化 AI 模型")
             logger.info("正在连接 AI 服务...")
             try:
@@ -200,12 +209,12 @@ def process_document(config, logger):
                 return False
             pbar.update(10)
 
-            # --- 1.3 构造 Prompt ---
+            # 3. 构造动态Prompt（标题和输入文档匹配）
             pbar.set_description("正在构造分析请求")
             archive_prompt = f"""
             你是一名资深的嵌入式通信协议工程师。请基于提供的文档生成一份严谨的归档文档。
             【强制结构】
-            # 3D人脸识别模组 通信协议归档文档
+            # {output_base_name}
             ## 1. 文档概述
             ## 2. 物理层通信参数
             ## 3. 链路层数据帧结构 (表格)
@@ -216,11 +225,11 @@ def process_document(config, logger):
             ## 8. 典型交互示例 (3个)
             ## 9. 错误码汇总表 (表格)
             【参考文档】
-            {full_doc_text[:18000]}
+            {full_doc_text[:30000]}
             """
             pbar.update(10)
 
-            # --- 1.4 调用 AI 生成 ---
+            # 4. 调用 AI 生成
             pbar.set_description("AI 正在分析文档")
             logger.info("正在调用 AI 生成归档内容...")
             ai_start_time = time.time()
@@ -231,7 +240,7 @@ def process_document(config, logger):
             logger.info(f"AI 生成完成，耗时: {ai_duration:.2f}秒")
             pbar.update(40)
 
-            # --- 1.5 多格式保存 ---
+            # 5. 多格式保存
             pbar.set_description("正在保存归档文件")
             saved_files = save_archive_multi_format(ai_response.content, output_base_name, config, logger)
             
@@ -255,12 +264,50 @@ def process_document(config, logger):
 
 # ================= 程序入口 =================
 if __name__ == "__main__":
+    # 1. 解析命令行参数
+    args = parse_args()
+    
+    # 2. 加载配置
     config = load_config()
+    
+    # 3. 初始化日志
     logger = setup_logging(config)
     
+    # 4. 打印欢迎信息
     print("\n" + "="*60)
-    print("   硬件数据手册阅读 Agent (多格式版)")
+    print("   硬件数据手册解析归档 Agent (hw_datasheet_agent)")
     print("="*60 + "\n")
     
-    success = process_document(config, logger)
+    # 5. 处理输入文件路径
+    input_dir = config['document'].get('input_dir', 'input_docs')
+    # 命令行指定的文件优先级最高
+    if args.file:
+        input_file_name = args.file
+    else:
+        input_file_name = config['document']['input_file']
+    
+    # 拼接完整路径：如果是绝对路径直接用，否则拼接input_dir
+    if os.path.isabs(input_file_name):
+        input_file_path = input_file_name
+    else:
+        input_file_path = os.path.join(input_dir, input_file_name)
+    
+    # 6. 生成最终的输出基础名称（优先级：命令行 > 配置文件 > 自动生成）
+    # 提取输入文件的纯名称（不带路径和后缀）
+    input_file_basename = os.path.splitext(os.path.basename(input_file_path))[0]
+    # 优先级1：命令行指定的输出名称
+    if args.output:
+        final_output_base_name = args.output.strip()
+    # 优先级2：配置文件里指定的名称
+    elif config['document'].get('output_base_name', '').strip():
+        final_output_base_name = config['document']['output_base_name'].strip()
+    # 优先级3：自动根据输入文件名生成
+    else:
+        final_output_base_name = f"{input_file_basename}_通信协议归档"
+    
+    logger.info(f"待解析文档: {input_file_path}")
+    logger.info(f"输出文档基础名称: {final_output_base_name}")
+    
+    # 7. 运行主流程
+    success = process_document(config, input_file_path, final_output_base_name, logger)
     sys.exit(0 if success else 1)
