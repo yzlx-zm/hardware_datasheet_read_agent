@@ -1,0 +1,10 @@
+langchain
+langchain-openai
+langchain-community
+pymupdf
+python-docx
+chromadb
+sentence-transformers
+openpyxl
+pyyaml
+tqdm

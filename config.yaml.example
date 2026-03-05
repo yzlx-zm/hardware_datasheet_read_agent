@@ -1,0 +1,27 @@
+# ================= 硬件文档 Agent 配置文件模板 =================
+# 复制此文件，重命名为 config.yaml，然后填入你的真实配置
+
+# 1. AI 模型配置
+llm:
+  # 你的 DeepSeek API Key (从 platform.deepseek.com 获取)
+  api_key: "sk-这里填你的Key，不要填在这个example文件里"
+  # 模型名称，默认 deepseek-chat 即可
+  model_name: "deepseek-chat"
+  # API 地址
+  base_url: "https://api.deepseek.com"
+  # 温度参数 (0.0-1.0)，越低越严谨
+  temperature: 0.05
+
+# 2. 文档处理配置
+document:
+  # 要处理的硬件文档文件名 (放在项目根目录下)
+  input_file: "test.pdf"
+  # 生成的归档文档文件名
+  output_file: "3D人脸识别模组_通信协议归档文档.md"
+
+# 3. 日志配置
+logging:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # 日志文件保存目录
+  log_dir: "agent_logs"
