@@ -19,12 +19,15 @@ document:
   # 默认要处理的文档文件名（支持相对input_dir的路径/绝对路径）
   input_file: "test.pdf"
   # 生成的归档文档主文件名 (不含后缀)
-  output_base_name: "3D人脸识别模组_通信协议归档"
+  # ✅ 留空则自动根据输入文件名生成，格式：[输入文件名主体]_通信协议归档
+  # ✅ 手动填写则固定使用该名称，优先级最高
+  output_base_name: ""
   # 输出格式列表：可多选 ["markdown", "word", "excel"]
   output_formats:
     - "markdown"
     - "word"
     - "excel"
+
 
 # 3. 归档配置
 archive:

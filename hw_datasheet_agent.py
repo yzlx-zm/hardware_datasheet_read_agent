@@ -14,11 +14,16 @@ from langchain_openai import ChatOpenAI
 # ================= 全局初始化 =================
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='硬件数据手册阅读 Agent')
+    parser = argparse.ArgumentParser(description='硬件数据手册解析归档 Agent')
     parser.add_argument(
         '-f', '--file', 
         type=str, 
         help='指定要解析的文档文件（支持相对input_dir的路径/绝对路径），优先级高于配置文件'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        help='指定输出文档的基础名称（不含后缀），优先级高于配置文件'
     )
     return parser.parse_args()
 
@@ -175,10 +180,9 @@ def save_archive_multi_format(content, base_name, config, logger):
     return saved_files
 
 # ================= 核心业务逻辑 =================
-def process_document(config, input_file_path, logger):
+def process_document(config, input_file_path, output_base_name, logger):
     """主处理流程"""
     start_time = time.time()
-    output_base_name = config['document']['output_base_name']
 
     try:
         with tqdm(total=100, desc="整体进度", bar_format='{l_bar}{bar}| {n_fmt}%') as pbar:
@@ -205,12 +209,12 @@ def process_document(config, input_file_path, logger):
                 return False
             pbar.update(10)
 
-            # 3. 构造 Prompt
+            # 3. 构造动态Prompt（标题和输入文档匹配）
             pbar.set_description("正在构造分析请求")
             archive_prompt = f"""
             你是一名资深的嵌入式通信协议工程师。请基于提供的文档生成一份严谨的归档文档。
             【强制结构】
-            # 通信协议归档文档
+            # {output_base_name}
             ## 1. 文档概述
             ## 2. 物理层通信参数
             ## 3. 链路层数据帧结构 (表格)
@@ -221,7 +225,7 @@ def process_document(config, input_file_path, logger):
             ## 8. 典型交互示例 (3个)
             ## 9. 错误码汇总表 (表格)
             【参考文档】
-            {full_doc_text[:18000]}
+            {full_doc_text[:30000]}
             """
             pbar.update(10)
 
@@ -288,8 +292,22 @@ if __name__ == "__main__":
     else:
         input_file_path = os.path.join(input_dir, input_file_name)
     
-    logger.info(f"待解析文档: {input_file_path}")
+    # 6. 生成最终的输出基础名称（优先级：命令行 > 配置文件 > 自动生成）
+    # 提取输入文件的纯名称（不带路径和后缀）
+    input_file_basename = os.path.splitext(os.path.basename(input_file_path))[0]
+    # 优先级1：命令行指定的输出名称
+    if args.output:
+        final_output_base_name = args.output.strip()
+    # 优先级2：配置文件里指定的名称
+    elif config['document'].get('output_base_name', '').strip():
+        final_output_base_name = config['document']['output_base_name'].strip()
+    # 优先级3：自动根据输入文件名生成
+    else:
+        final_output_base_name = f"{input_file_basename}_通信协议归档"
     
-    # 6. 运行主流程
-    success = process_document(config, input_file_path, logger)
+    logger.info(f"待解析文档: {input_file_path}")
+    logger.info(f"输出文档基础名称: {final_output_base_name}")
+    
+    # 7. 运行主流程
+    success = process_document(config, input_file_path, final_output_base_name, logger)
     sys.exit(0 if success else 1)
