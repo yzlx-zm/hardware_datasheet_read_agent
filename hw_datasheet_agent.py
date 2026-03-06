@@ -19,6 +19,24 @@ except ImportError:
 # token计数依赖
 import tiktoken
 
+# ================= 全局固定配置 =================
+# 归档文档固定章节结构（与Prompt强制结构完全一致，用于去重、合并、校验）
+ARCHIVE_CHAPTERS = [
+    "1. 文档概述",
+    "2. 物理层通信参数",
+    "3. 链路层数据帧结构",
+    "4. 核心指令集汇总",
+    "5. 校验算法定义",
+    "6. 模块全生命周期工作时序",
+    "7. 特殊时序与约束标记",
+    "8. 典型交互示例",
+    "9. 错误码汇总表"
+]
+# 主标题匹配前缀
+ARCHIVE_TITLE_PREFIX = "# "
+# 二级章节匹配前缀
+CHAPTER_PREFIX = "## "
+
 # ================= 全局初始化 =================
 def parse_args():
     """解析命令行参数"""
@@ -177,6 +195,81 @@ def count_tokens(text: str, model_name: str = "gpt-3.5-turbo") -> int:
     except Exception:
         # 兜底方案：按字符数估算（1token≈3个中英混合字符）
         return len(text) // 3
+# ================= 归档内容合并与去重辅助函数 =================
+def split_content_by_chapter(content: str) -> dict:
+    """
+    将生成的归档内容按固定章节拆分，返回「章节名: 章节内容」的字典，用于去重合并
+    :param content: AI生成的单块/完整归档内容
+    :return: 章节字典，key为章节名，value为章节完整内容
+    """
+    chapter_dict = {}
+    current_chapter = None
+    current_content = []
+
+    lines = content.split('\n')
+    for line in lines:
+        # 匹配二级章节标题
+        if line.startswith(CHAPTER_PREFIX):
+            # 保存上一个章节的内容
+            if current_chapter is not None:
+                chapter_dict[current_chapter] = "\n".join(current_content).strip()
+            # 开启新章节，仅保留固定章节列表内的章节
+            chapter_title = line[len(CHAPTER_PREFIX):].strip()
+            for standard_chapter in ARCHIVE_CHAPTERS:
+                if standard_chapter in chapter_title:
+                    current_chapter = standard_chapter
+                    current_content = []
+                    break
+            else:
+                current_chapter = None
+                current_content = []
+        # 非标题行，加入当前章节内容
+        elif current_chapter is not None:
+            current_content.append(line)
+    
+    # 保存最后一个章节
+    if current_chapter is not None and current_content:
+        chapter_dict[current_chapter] = "\n".join(current_content).strip()
+    
+    return chapter_dict
+
+def merge_chapter_content(existing_dict: dict, new_dict: dict) -> dict:
+    """
+    增量合并章节内容，已有章节仅补充新内容，无内容的章节新增，彻底避免重复
+    :param existing_dict: 已有的章节内容字典
+    :param new_dict: 新生成的章节内容字典
+    :return: 合并后的完整章节字典
+    """
+    merged_dict = existing_dict.copy()
+    for chapter_name, new_content in new_dict.items():
+        # 章节不存在：直接新增
+        if chapter_name not in merged_dict:
+            merged_dict[chapter_name] = new_content
+        # 章节已存在：仅补充新内容，避免重复
+        else:
+            existing_content = merged_dict[chapter_name]
+            # 逐行去重，仅添加原有内容里没有的新行
+            new_lines = new_content.split('\n')
+            for line in new_lines:
+                line_stripped = line.strip()
+                if line_stripped and line_stripped not in existing_content:
+                    existing_content += "\n" + line
+            merged_dict[chapter_name] = existing_content.strip()
+    return merged_dict
+
+def rebuild_full_content(title: str, chapter_dict: dict) -> str:
+    """
+    基于合并后的章节字典，重新生成结构完整、无重复的归档文档
+    :param title: 文档主标题
+    :param chapter_dict: 合并后的章节内容字典
+    :return: 完整的Markdown归档内容
+    """
+    full_content = f"{ARCHIVE_TITLE_PREFIX}{title}\n\n"
+    # 严格按照固定章节顺序生成，保证结构统一
+    for chapter_name in ARCHIVE_CHAPTERS:
+        if chapter_name in chapter_dict and chapter_dict[chapter_name].strip():
+            full_content += f"{CHAPTER_PREFIX}{chapter_name}\n{chapter_dict[chapter_name]}\n\n"
+    return full_content.strip()
 
 def split_document_by_chapter(full_text: str, max_chunk_tokens: int = 28000, logger=None) -> list:
     """
@@ -271,7 +364,6 @@ def save_archive_multi_format(content, base_name, config, logger):
             logger.error(f"保存 Word 失败: {e}")
 
     # 保存 Excel
-       # 保存 Excel
     if "excel" in formats:
         xlsx_path = os.path.join(target_dir, f"{base_name}_指令集_错误码.xlsx")
         try:
@@ -369,7 +461,7 @@ def process_document(config, input_file_path, output_base_name, logger):
                 return False
             pbar.update(10)
 
-             # 3. 文档token统计与分块处理（解决长文档截断核心问题）
+                        # 3. 文档token统计与分块处理（解决长文档截断核心问题）
             pbar.set_description("正在处理文档分块")
             # 模型上下文安全上限：DeepSeek-chat 32k上下文，预留4k给Prompt和输出，单块最大28k token
             max_single_chunk_tokens = 28000
@@ -393,15 +485,17 @@ def process_document(config, input_file_path, output_base_name, logger):
                         document_chunks[i:i] = sub_chunks
             pbar.update(5)
 
-            # 4. 构造固定结构Prompt模板（100%兼容原有归档规则）
+            # 4. 构造强约束Prompt模板（彻底解决重复生成问题）
             pbar.set_description("正在构造分析请求")
             base_prompt_template = f"""
-            你是一名资深的嵌入式通信协议工程师。请基于提供的文档片段，补充完善归档文档。
-            【强制规则】
-            1. 严格遵循下方固定归档结构，不得新增/删减章节，所有表格必须用标准Markdown格式
-            2. 特殊时序与约束必须用【⚠️】开头标记，典型交互示例不少于3个
-            3. 基于【已生成的归档内容】补充完善，不得重复生成已有内容，仅输出归档正文
-            【固定归档结构】
+            你是一名资深的嵌入式通信协议工程师。请严格遵循以下规则，基于文档片段补充完善归档文档。
+            【绝对强制规则，违反则输出无效】
+            1. 仅输出【缺失章节的内容】，绝对禁止重复生成【已生成的归档内容】中已有的章节和内容
+            2. 仅当文档片段中包含对应章节的信息时，才生成该章节内容，无信息的章节绝对不要生成
+            3. 严格遵循下方固定的9个章节结构，不得新增/删减章节，所有表格必须用标准Markdown格式
+            4. 特殊时序与约束必须用【⚠️】开头标记，典型交互示例不少于3个
+            5. 仅输出章节正文内容，不要输出任何解释、说明、道歉类话术
+            【固定归档章节结构】
             # {output_base_name}
             ## 1. 文档概述
             ## 2. 物理层通信参数
@@ -412,51 +506,55 @@ def process_document(config, input_file_path, output_base_name, logger):
             ## 7. 特殊时序与约束标记 (用【⚠️】开头)
             ## 8. 典型交互示例 (3个)
             ## 9. 错误码汇总表 (表格)
-            【参考文档片段】
-            {{document_chunk}}
             【已生成的归档内容】
             {{generated_content}}
+            【当前待解析的文档片段】
+            {{document_chunk}}
             """
             pbar.update(5)
 
-            # 5. 分块调用AI生成，合并完整归档内容
+            # 5. 分块调用AI生成，增量合并内容（彻底解决重复堆叠问题）
             pbar.set_description("AI 正在分块解析文档")
             logger.info(f"开始分块生成归档内容，共 {len(document_chunks)} 个解析块")
             ai_start_time = time.time()
-            full_generated_content = ""
+            
+            # 初始化：用字典存储章节内容，替代简单字符串拼接，天然去重
+            merged_chapter_dict = {}
 
-            # 逐块解析，保证上下文连贯，单块失败不中断整体流程
+            # 逐块解析，增量合并，单块失败不中断整体流程
             for chunk_index, chunk in enumerate(document_chunks):
                 chunk_start_time = time.time()
                 logger.info(f"▶️  正在解析第 {chunk_index+1}/{len(document_chunks)} 块")
                 
-                # 构造当前块的Prompt，传入已生成内容避免重复
+                # 基于已合并的内容，生成当前块的Prompt
+                current_generated_content = rebuild_full_content(output_base_name, merged_chapter_dict)
                 current_prompt = base_prompt_template.format(
                     document_chunk=chunk,
-                    generated_content=full_generated_content if full_generated_content else "无"
+                    generated_content=current_generated_content if current_generated_content else "无（首次生成，需输出所有有信息的章节内容）"
                 )
 
                 # 调用AI生成当前块内容
                 try:
                     chunk_response = llm.invoke(current_prompt)
                     chunk_content = chunk_response.content.strip()
-
-                    # 去重重复的主标题，保证文档结构唯一
-                    if full_generated_content and chunk_content.startswith(f"# {output_base_name}"):
-                        chunk_content = "\n".join(chunk_content.split("\n")[1:]).strip()
                     
-                    full_generated_content += "\n" + chunk_content
+                    # 解析当前块生成的章节内容，增量合并到总字典中
+                    chunk_chapter_dict = split_content_by_chapter(chunk_content)
+                    merged_chapter_dict = merge_chapter_content(merged_chapter_dict, chunk_chapter_dict)
+                    
                     chunk_duration = time.time() - chunk_start_time
-                    logger.info(f"✅ 第 {chunk_index+1}/{len(document_chunks)} 块解析完成，耗时: {chunk_duration:.2f}秒")
+                    logger.info(f"✅ 第 {chunk_index+1}/{len(document_chunks)} 块解析完成，耗时: {chunk_duration:.2f}秒，新增/补充章节: {list(chunk_chapter_dict.keys())}")
                 except Exception as e:
                     logger.error(f"❌ 第 {chunk_index+1} 块解析失败: {str(e)}，跳过当前块继续解析", exc_info=True)
                 
                 # 进度条更新：分块解析占35%总进度，与原有进度条体系完全兼容
                 pbar.update(35 / len(document_chunks))
 
-            # 6. 解析完成统计
+            # 6. 重新生成完整无重复的归档内容
+            full_generated_content = rebuild_full_content(output_base_name, merged_chapter_dict)
+            # 解析完成统计
             ai_duration = time.time() - ai_start_time
-            logger.info(f"AI 全部分块解析完成，总耗时: {ai_duration:.2f}秒")
+            logger.info(f"AI 全部分块解析完成，总耗时: {ai_duration:.2f}秒，最终生成完整章节: {list(merged_chapter_dict.keys())}")
             pbar.update(5)
 
             # 7. 多格式保存（修复：使用分块合并后的正确变量full_generated_content）
