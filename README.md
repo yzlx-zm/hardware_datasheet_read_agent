@@ -10,6 +10,8 @@
 ✅ **命令行增强**：支持通过命令行指定待解析文档，无需修改配置文件  
 ✅ **工程化能力**：完整的日志系统、进度可视化、异常处理兜底，稳定可靠  
 ✅ **Git 规范管理**：双分支开发规范，API Key 安全隔离，符合工业级开发流程  
+✅ **结构化表格提取**：自动从文档中提取数据帧、指令集、错误码表格，写入Excel分Sheet存储
+✅ **CSV格式输出**：新增CSV格式支持，生成的表格可直接导入嵌入式开发工具使用
 
 ## 快速开始
 
@@ -105,11 +107,12 @@ hardware_datasheet_read_agent/
 | `document.input_dir`        | 待解析文档的根目录，默认 `input_docs`                         |
 | `document.input_file`       | 默认解析的文档文件名                                           |
 | `document.output_base_name` | 输出文档基础名称，留空则自动根据输入文件名生成               |
-| `document.output_formats`   | 输出格式列表，支持 `markdown`/`word`/`excel`                 |
+| `document.output_formats`   | 输出格式列表，支持 `markdown`/`word`/`excel`/`csv`         |
 | `archive.use_timestamp_folder` | 是否按时间戳创建归档子文件夹，避免文件覆盖                |
 | `archive.archive_root_dir`  | 归档文档根目录，默认 `output_archive`                        |
 | `logging.level`             | 日志级别，支持 `DEBUG`/`INFO`/`WARNING`/`ERROR`             |
 | `logging.log_dir`           | 日志文件存放目录，默认 `agent_logs`                          |
+
 
 ## 许可证
 

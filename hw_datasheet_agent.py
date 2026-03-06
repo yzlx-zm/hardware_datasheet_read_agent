@@ -95,6 +95,65 @@ def load_document_smart(file_path, logger):
         logger.error(f"加载文档失败: {str(e)}", exc_info=True)
         return None
 
+# ================= 表格解析辅助函数 =================
+def extract_markdown_table(md_content: str, chapter_title: str, logger):
+    """
+    从Markdown内容中提取指定章节的表格，返回pandas.DataFrame
+    适配AI生成的固定章节结构，异常场景自动兜底，新手友好
+    :param md_content: AI生成的完整Markdown归档内容
+    :param chapter_title: 要提取的章节标题（如"链路层数据帧结构"）
+    :param logger: 日志对象
+    :return: 提取成功返回DataFrame，失败返回None
+    """
+    try:
+        # 1. 按换行拆分内容，逐行匹配目标章节
+        lines = md_content.split('\n')
+        chapter_found = False
+        table_lines = []
+
+        # 2. 匹配目标章节，捕获章节后的Markdown表格
+        for line in lines:
+            # 匹配目标章节标题（兼容# 层级、前后空格）
+            if not chapter_found and chapter_title in line and line.startswith('#'):
+                chapter_found = True
+                continue
+            # 找到章节后，开始捕获表格（以|开头的行是Markdown表格行）
+            if chapter_found:
+                # 遇到下一个章节标题，停止捕获（表格结束）
+                if line.startswith('#'):
+                    break
+                # 只保留表格行
+                if line.strip().startswith('|') and line.strip().endswith('|'):
+                    table_lines.append(line.strip())
+        
+        # 兜底：未捕获到表格行
+        if len(table_lines) < 2:
+            logger.warning(f"⚠️ 章节【{chapter_title}】未找到有效表格，跳过")
+            return None
+
+        # 3. 清洗Markdown表格，转为标准CSV格式
+        cleaned_rows = []
+        for row in table_lines:
+            # 去掉首尾的|，按|拆分单元格，去除每个单元格前后空格
+            cells = [cell.strip() for cell in row[1:-1].split('|')]
+            # 过滤Markdown表格的分隔行（---|---格式）
+            if not all(cell.replace('-', '').strip() == '' for cell in cells):
+                cleaned_rows.append(cells)
+        
+        # 兜底：清洗后无有效数据行
+        if len(cleaned_rows) < 1:
+            logger.warning(f"⚠️ 章节【{chapter_title}】表格清洗后无有效数据，跳过")
+            return None
+
+        # 4. 转为DataFrame返回
+        import pandas as pd
+        df = pd.DataFrame(cleaned_rows[1:], columns=cleaned_rows[0])
+        logger.info(f"✅ 成功提取【{chapter_title}】表格，共{len(df)}条数据")
+        return df
+
+    except Exception as e:
+        logger.error(f"❌ 提取【{chapter_title}】表格失败: {str(e)}", exc_info=True)
+        return None
 # ================= 多格式归档保存器 =================
 def save_archive_multi_format(content, base_name, config, logger):
     """保存为 Markdown/Word/Excel 多种格式"""
@@ -154,28 +213,71 @@ def save_archive_multi_format(content, base_name, config, logger):
             logger.error(f"保存 Word 失败: {e}")
 
     # 保存 Excel
+       # 保存 Excel
     if "excel" in formats:
         xlsx_path = os.path.join(target_dir, f"{base_name}_指令集_错误码.xlsx")
         try:
             import pandas as pd
             
             with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
+                # 1. 保留说明Sheet，补充完整生成信息
                 df_info = pd.DataFrame({'说明': [
                     '本文件由硬件文档Agent自动生成', 
                     f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-                    f'源文档: {base_name}'
+                    f'源文档: {base_name}',
+                    '包含内容：数据帧结构、核心指令集、错误码汇总'
                 ]})
-                df_info.to_excel(writer, sheet_name='说明', index=False)
-                
-                df_placeholder = pd.DataFrame({'提示': ['完整的指令集和错误码表格提取功能开发中，敬请期待']})
-                df_placeholder.to_excel(writer, sheet_name='指令集与错误码', index=False)
-            
+                df_info.to_excel(writer, sheet_name='文档说明', index=False)
+
+                # 2. 批量提取核心表格，写入对应Sheet
+                # 定义要提取的章节与Sheet名映射（与AI生成的固定结构完全匹配）
+                table_map = {
+                    "链路层数据帧结构": "数据帧结构",
+                    "核心指令集汇总": "核心指令集",
+                    "错误码汇总表": "错误码汇总"
+                }
+
+                for chapter_title, sheet_name in table_map.items():
+                    table_df = extract_markdown_table(content, chapter_title, logger)
+                    if table_df is not None and not table_df.empty:
+                        table_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
             logger.info(f"✅ Excel 已保存: {xlsx_path}")
             saved_files.append(xlsx_path)
         except ImportError:
             logger.warning("⚠️ 未安装 pandas/openpyxl 库，跳过 Excel 生成。请运行: pip install pandas openpyxl")
         except Exception as e:
             logger.error(f"保存 Excel 失败: {e}")
+
+        # 保存 CSV
+    if "csv" in formats:
+        try:
+            import pandas as pd
+            # 定义要提取的章节与CSV文件名映射
+            table_map = {
+                "链路层数据帧结构": "数据帧结构",
+                "核心指令集汇总": "核心指令集",
+                "错误码汇总表": "错误码汇总"
+            }
+
+            csv_saved_count = 0
+            for chapter_title, file_suffix in table_map.items():
+                csv_path = os.path.join(target_dir, f"{base_name}_{file_suffix}.csv")
+                table_df = extract_markdown_table(content, chapter_title, logger)
+                if table_df is not None and not table_df.empty:
+                    # 用utf-8-sig编码，兼容Windows Excel打开不乱码
+                    table_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                    logger.info(f"✅ CSV 已保存: {csv_path}")
+                    saved_files.append(csv_path)
+                    csv_saved_count += 1
+            
+            if csv_saved_count == 0:
+                logger.warning("⚠️ 未提取到有效表格，无CSV文件生成")
+
+        except ImportError:
+            logger.warning("⚠️ 未安装 pandas 库，跳过 CSV 生成。请运行: pip install pandas")
+        except Exception as e:
+            logger.error(f"保存 CSV 失败: {e}")        
 
     return saved_files
 

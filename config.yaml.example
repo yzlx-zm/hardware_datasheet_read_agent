@@ -27,6 +27,7 @@ document:
     - "markdown"
     - "word"
     - "excel"
+    - "csv"
 
 
 # 3. 归档配置
