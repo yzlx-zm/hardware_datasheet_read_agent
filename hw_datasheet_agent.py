@@ -7,9 +7,17 @@ from datetime import datetime
 from tqdm import tqdm
 import yaml
 
-# 第三方库导入
 from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
 from langchain_openai import ChatOpenAI
+# 新增：长文档分块解析所需依赖，兼容新旧版LangChain
+try:
+    # 新版LangChain（0.2.x+）官方推荐路径
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    # 旧版LangChain兼容兜底路径
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+# token计数依赖
+import tiktoken
 
 # ================= 全局初始化 =================
 def parse_args():
@@ -154,6 +162,56 @@ def extract_markdown_table(md_content: str, chapter_title: str, logger):
     except Exception as e:
         logger.error(f"❌ 提取【{chapter_title}】表格失败: {str(e)}", exc_info=True)
         return None
+
+# ================= 长文档分块解析辅助函数 =================
+def count_tokens(text: str, model_name: str = "gpt-3.5-turbo") -> int:
+    """
+    计算文本token数量，DeepSeek与OpenAI token计数规则完全兼容
+    :param text: 待计算的文本内容
+    :param model_name: 编码适配模型名称，默认兼容DeepSeek
+    :return: 文本token数量
+    """
+    try:
+        encoding = tiktoken.encoding_for_model(model_name)
+        return len(encoding.encode(text))
+    except Exception:
+        # 兜底方案：按字符数估算（1token≈3个中英混合字符）
+        return len(text) // 3
+
+def split_document_by_chapter(full_text: str, max_chunk_tokens: int = 28000, logger=None) -> list:
+    """
+    硬件文档专属智能分块：按章节标题拆分，保证单块token不超限、不拆分完整章节
+    :param full_text: 完整的文档全文本
+    :param max_chunk_tokens: 单块最大token数，预留20%余量给Prompt和模型输出
+    :param logger: 日志对象
+    :return: 分块后的文本列表
+    """
+    try:
+        # 硬件手册专属分块规则：优先按二级/三级章节拆分，保证章节完整性
+        text_splitter = RecursiveCharacterTextSplitter(
+            separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
+            chunk_size=max_chunk_tokens,  # 修复：直接传token上限，不再乘以3，与length_function单位完全匹配
+            chunk_overlap=300,  # 优化：块间上下文重叠提升至300，避免长文档章节上下文断裂
+            length_function=lambda x: count_tokens(x)
+        )
+        chunks = text_splitter.split_text(full_text)
+        
+        if logger:
+            logger.info(f"📄 文档分块完成，共分为 {len(chunks)} 块，单块最大token上限: {max_chunk_tokens}")
+            for i, chunk in enumerate(chunks):
+                logger.info(f"  第{i+1}块 token数: {count_tokens(chunk)}")
+        
+        return chunks
+
+    except Exception as e:
+        if logger:
+            logger.error(f"❌ 文档分块失败: {str(e)}，自动降级为单块解析模式", exc_info=True)
+        # 异常兜底：返回原文本安全截断内容，保证程序正常运行
+        safe_single_chunk = full_text[:max_chunk_tokens*3]
+        if logger:
+            logger.warning(f"⚠️  降级单块token数: {count_tokens(safe_single_chunk)}")
+        return [safe_single_chunk]
+
 # ================= 多格式归档保存器 =================
 def save_archive_multi_format(content, base_name, config, logger):
     """保存为 Markdown/Word/Excel 多种格式"""
@@ -311,11 +369,39 @@ def process_document(config, input_file_path, output_base_name, logger):
                 return False
             pbar.update(10)
 
-            # 3. 构造动态Prompt（标题和输入文档匹配）
+             # 3. 文档token统计与分块处理（解决长文档截断核心问题）
+            pbar.set_description("正在处理文档分块")
+            # 模型上下文安全上限：DeepSeek-chat 32k上下文，预留4k给Prompt和输出，单块最大28k token
+            max_single_chunk_tokens = 28000
+            total_tokens = count_tokens(full_doc_text)
+            logger.info(f"📄 文档总token数: {total_tokens}")
+            
+            # 短文档直接走单块逻辑，无额外性能开销
+            if total_tokens <= max_single_chunk_tokens:
+                document_chunks = [full_doc_text]
+                logger.info("✅ 文档长度在安全范围内，采用单块解析模式")
+            # 长文档按章节智能分块解析
+            else:
+                document_chunks = split_document_by_chapter(full_doc_text, max_single_chunk_tokens, logger)
+                # 兜底：分块后仍有超上限的块，强制二次拆分，彻底杜绝超上限问题
+                for i, chunk in reversed(list(enumerate(document_chunks))):
+                    chunk_token = count_tokens(chunk)
+                    if chunk_token > max_single_chunk_tokens:
+                        logger.warning(f"⚠️  第{i+1}块token数{chunk_token}仍超上限，执行强制二次拆分")
+                        sub_chunks = split_document_by_chapter(chunk, max_single_chunk_tokens//2, logger)
+                        document_chunks.pop(i)
+                        document_chunks[i:i] = sub_chunks
+            pbar.update(5)
+
+            # 4. 构造固定结构Prompt模板（100%兼容原有归档规则）
             pbar.set_description("正在构造分析请求")
-            archive_prompt = f"""
-            你是一名资深的嵌入式通信协议工程师。请基于提供的文档生成一份严谨的归档文档。
-            【强制结构】
+            base_prompt_template = f"""
+            你是一名资深的嵌入式通信协议工程师。请基于提供的文档片段，补充完善归档文档。
+            【强制规则】
+            1. 严格遵循下方固定归档结构，不得新增/删减章节，所有表格必须用标准Markdown格式
+            2. 特殊时序与约束必须用【⚠️】开头标记，典型交互示例不少于3个
+            3. 基于【已生成的归档内容】补充完善，不得重复生成已有内容，仅输出归档正文
+            【固定归档结构】
             # {output_base_name}
             ## 1. 文档概述
             ## 2. 物理层通信参数
@@ -326,25 +412,56 @@ def process_document(config, input_file_path, output_base_name, logger):
             ## 7. 特殊时序与约束标记 (用【⚠️】开头)
             ## 8. 典型交互示例 (3个)
             ## 9. 错误码汇总表 (表格)
-            【参考文档】
-            {full_doc_text[:30000]}
+            【参考文档片段】
+            {{document_chunk}}
+            【已生成的归档内容】
+            {{generated_content}}
             """
-            pbar.update(10)
+            pbar.update(5)
 
-            # 4. 调用 AI 生成
-            pbar.set_description("AI 正在分析文档")
-            logger.info("正在调用 AI 生成归档内容...")
+            # 5. 分块调用AI生成，合并完整归档内容
+            pbar.set_description("AI 正在分块解析文档")
+            logger.info(f"开始分块生成归档内容，共 {len(document_chunks)} 个解析块")
             ai_start_time = time.time()
-            
-            ai_response = llm.invoke(archive_prompt)
-            
-            ai_duration = time.time() - ai_start_time
-            logger.info(f"AI 生成完成，耗时: {ai_duration:.2f}秒")
-            pbar.update(40)
+            full_generated_content = ""
 
-            # 5. 多格式保存
+            # 逐块解析，保证上下文连贯，单块失败不中断整体流程
+            for chunk_index, chunk in enumerate(document_chunks):
+                chunk_start_time = time.time()
+                logger.info(f"▶️  正在解析第 {chunk_index+1}/{len(document_chunks)} 块")
+                
+                # 构造当前块的Prompt，传入已生成内容避免重复
+                current_prompt = base_prompt_template.format(
+                    document_chunk=chunk,
+                    generated_content=full_generated_content if full_generated_content else "无"
+                )
+
+                # 调用AI生成当前块内容
+                try:
+                    chunk_response = llm.invoke(current_prompt)
+                    chunk_content = chunk_response.content.strip()
+
+                    # 去重重复的主标题，保证文档结构唯一
+                    if full_generated_content and chunk_content.startswith(f"# {output_base_name}"):
+                        chunk_content = "\n".join(chunk_content.split("\n")[1:]).strip()
+                    
+                    full_generated_content += "\n" + chunk_content
+                    chunk_duration = time.time() - chunk_start_time
+                    logger.info(f"✅ 第 {chunk_index+1}/{len(document_chunks)} 块解析完成，耗时: {chunk_duration:.2f}秒")
+                except Exception as e:
+                    logger.error(f"❌ 第 {chunk_index+1} 块解析失败: {str(e)}，跳过当前块继续解析", exc_info=True)
+                
+                # 进度条更新：分块解析占35%总进度，与原有进度条体系完全兼容
+                pbar.update(35 / len(document_chunks))
+
+            # 6. 解析完成统计
+            ai_duration = time.time() - ai_start_time
+            logger.info(f"AI 全部分块解析完成，总耗时: {ai_duration:.2f}秒")
+            pbar.update(5)
+
+            # 7. 多格式保存（修复：使用分块合并后的正确变量full_generated_content）
             pbar.set_description("正在保存归档文件")
-            saved_files = save_archive_multi_format(ai_response.content, output_base_name, config, logger)
+            saved_files = save_archive_multi_format(full_generated_content, output_base_name, config, logger)
             
             if saved_files:
                 pbar.update(10)
@@ -356,7 +473,6 @@ def process_document(config, input_file_path, output_base_name, logger):
     except Exception as e:
         logger.error(f"处理过程中发生未预期的错误: {str(e)}", exc_info=True)
         return False
-
     total_duration = time.time() - start_time
     logger.info(f"="*50)
     logger.info(f"🎉 任务全部完成！总耗时: {total_duration:.2f}秒")
@@ -410,6 +526,6 @@ if __name__ == "__main__":
     logger.info(f"待解析文档: {input_file_path}")
     logger.info(f"输出文档基础名称: {final_output_base_name}")
     
-    # 7. 运行主流程
+    # 7. 运行主流程（修复后正确逻辑）
     success = process_document(config, input_file_path, final_output_base_name, logger)
     sys.exit(0 if success else 1)

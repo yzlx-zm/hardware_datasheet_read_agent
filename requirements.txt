@@ -6,6 +6,8 @@
 langchain
 langchain-openai
 langchain-community
+langchain-text-splitters  # 新增：长文档分块核心依赖
+tiktoken                  # 新增：token计数核心依赖
 
 # ---------- 文档解析与加载 ----------
 pymupdf                # PDF 文档加载 (PyMuPDF)
