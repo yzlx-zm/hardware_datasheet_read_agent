@@ -182,3 +182,49 @@ hardware_datasheet_read_agent/
 ## 许可证
 
 本项目仅供学习和开发使用，请勿用于商业用途。
+
+## 打包分发
+
+### 打包为 EXE
+
+```bash
+# 1. 安装 PyInstaller
+pip install pyinstaller
+
+# 2. 执行打包
+build_exe.bat
+
+# 3. 打包结果在 dist/ 目录
+```
+
+### 分发目录结构
+
+分发时只需复制以下文件：
+
+```
+hw_datasheet_agent/
+├── hw_datasheet_agent.exe  # 81MB 主程序
+├── config.yaml             # 配置文件（用户需修改 API Key）
+├── input_docs/             # 待解析文档目录
+└── 使用说明.md             # 使用说明
+```
+
+### 配置大模型
+
+用户修改 `config.yaml` 选择要使用的大模型：
+
+```yaml
+# DeepSeek
+llm:
+  api_key: "sk-your-api-key"
+  model_name: "deepseek-chat"
+  base_url: "https://api.deepseek.com/v1"
+  temperature: 0.05
+
+# 或 OpenAI
+llm:
+  api_key: "sk-your-openai-key"
+  model_name: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+  temperature: 0.05
+```

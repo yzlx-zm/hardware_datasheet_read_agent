@@ -1,0 +1,70 @@
+# ================= 硬件文档 Agent 配置文件 =================
+# 请根据你要使用的大模型服务填写配置
+
+# 1. AI 模型配置（选择一个，删除其他的注释）
+
+# ========== OpenAI ==========
+#llm:
+#  api_key: "sk-your-openai-api-key"
+#  model_name: "gpt-4o-mini"
+#  base_url: "https://api.openai.com/v1"
+#  temperature: 0.05
+
+# ========== DeepSeek ==========
+#llm:
+#  api_key: "sk-your-deepseek-api-key"
+#  model_name: "deepseek-chat"
+#  base_url: "https://api.deepseek.com/v1"
+#  temperature: 0.05
+
+# ========== 阿里云通义千问 ==========
+#llm:
+#  api_key: "sk-your-dashscope-api-key"
+#  model_name: "qwen-max-latest"
+#  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+#  temperature: 0.05
+
+# ========== 百度文心一言 ==========
+#llm:
+#  api_key: "your-api-key"
+#  model_name: "ernie-4.0-turbo-128k"
+#  base_url: "https://qianfan.baidubce.com/v2"
+#  temperature: 0.05
+
+# ========== 本地 Ollama ==========
+#llm:
+#  api_key: "ollama"
+#  model_name: "qwen2.5:14b"
+#  base_url: "http://localhost:11434/v1"
+#  temperature: 0.05
+
+# 2. 文档处理配置
+document:
+  input_dir: "input_docs"
+  input_file: ""
+  output_base_name: ""
+  output_formats:
+    - "markdown"
+    - "word"
+    - "excel"
+    - "csv"
+
+# 3. 归档配置
+archive:
+  use_timestamp_folder: true
+  archive_root_dir: "output_archive"
+
+# 4. 日志配置
+logging:
+  level: "INFO"
+  log_dir: "agent_logs"
+
+# 5. 审核配置
+review:
+  enabled: true
+  strict_mode: false
+  max_retries: 2
+  checks:
+    structure: true
+    table_format: true
+    data_consistency: true
