@@ -19,37 +19,66 @@ except ImportError:
 # token计数依赖
 import tiktoken
 
-# ================= 全局固定配置 =================
-# 归档文档固定章节结构（与Prompt强制结构完全一致，用于去重、合并、校验）
-ARCHIVE_CHAPTERS = [
-    "1. 文档概述",
-    "2. 物理层通信参数",
-    "3. 链路层数据帧结构",
-    "4. 核心指令集汇总",
-    "5. 校验算法定义",
-    "6. 模块全生命周期工作时序",
-    "7. 特殊时序与约束标记",
-    "8. 典型交互示例",
-    "9. 错误码汇总表"
-]
-# 主标题匹配前缀
-ARCHIVE_TITLE_PREFIX = "# "
-# 二级章节匹配前缀
-CHAPTER_PREFIX = "## "
+# ========== 新增：Agent 架构模块导入 ==========
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from agent.state_manager import StateManager
+    from reviewer import DataReviewer
+    from config.constants import ARCHIVE_CHAPTERS, CHAPTER_PREFIX, ARCHIVE_TITLE_PREFIX
+    AGENT_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Agent 模块导入失败，使用兼容模式: {e}")
+    AGENT_MODULES_AVAILABLE = False
+    # 兼容模式：使用原有的全局常量
+    ARCHIVE_CHAPTERS = [
+        "1. 文档概述",
+        "2. 物理层通信参数",
+        "3. 链路层数据帧结构",
+        "4. 核心指令集汇总",
+        "5. 校验算法定义",
+        "6. 模块全生命周期工作时序",
+        "7. 特殊时序与约束标记",
+        "8. 典型交互示例",
+        "9. 错误码汇总表"
+    ]
+    CHAPTER_PREFIX = "## "
+    ARCHIVE_TITLE_PREFIX = "# "
+
+# ================= 全局固定配置（兼容模式备用） =================
+# 注意：如果 Agent 模块可用，将从 config.constants 导入
+# 此处定义仅为兼容模式下的备用
 
 # ================= 全局初始化 =================
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='硬件数据手册解析归档 Agent')
     parser.add_argument(
-        '-f', '--file', 
-        type=str, 
+        '-f', '--file',
+        type=str,
         help='指定要解析的文档文件（支持相对input_dir的路径/绝对路径），优先级高于配置文件'
     )
     parser.add_argument(
         '-o', '--output',
         type=str,
         help='指定输出文档的基础名称（不含后缀），优先级高于配置文件'
+    )
+    parser.add_argument(
+        '--enable-review',
+        action='store_true',
+        default=None,
+        help='启用深度审核功能（结构检查 + 数据一致性）'
+    )
+    parser.add_argument(
+        '--no-review',
+        action='store_true',
+        help='禁用审核功能'
+    )
+    parser.add_argument(
+        '--strict-review',
+        action='store_true',
+        help='严格模式：审核不通过则终止，不输出文件'
     )
     return parser.parse_args()
 
@@ -184,17 +213,23 @@ def extract_markdown_table(md_content: str, chapter_title: str, logger):
 # ================= 长文档分块解析辅助函数 =================
 def count_tokens(text: str, model_name: str = "gpt-3.5-turbo") -> int:
     """
-    计算文本token数量，DeepSeek与OpenAI token计数规则完全兼容
+    计算文本token数量，兼容主流LLM模型，异常自动兜底
     :param text: 待计算的文本内容
-    :param model_name: 编码适配模型名称，默认兼容DeepSeek
+    :param model_name: 模型名称，自动适配tiktoken编码
     :return: 文本token数量
     """
     try:
+        # 优先适配模型对应的编码，不支持则自动降级为通用编码
         encoding = tiktoken.encoding_for_model(model_name)
         return len(encoding.encode(text))
     except Exception:
-        # 兜底方案：按字符数估算（1token≈3个中英混合字符）
-        return len(text) // 3
+        try:
+            # 通用兜底编码（cl100k_base兼容绝大多数开源/闭源模型）
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            # 最终兜底：按字符数估算（1token≈3个中英混合字符）
+            return len(text) // 3
 # ================= 归档内容合并与去重辅助函数 =================
 def split_content_by_chapter(content: str) -> dict:
     """
@@ -271,43 +306,52 @@ def rebuild_full_content(title: str, chapter_dict: dict) -> str:
             full_content += f"{CHAPTER_PREFIX}{chapter_name}\n{chapter_dict[chapter_name]}\n\n"
     return full_content.strip()
 
-def split_document_by_chapter(full_text: str, max_chunk_tokens: int = 28000, logger=None) -> list:
+def split_document_by_chapter(full_text: str, max_chunk_tokens: int = 28000, logger=None, model_name: str = "gpt-3.5-turbo") -> list:
     """
     硬件文档专属智能分块：按章节标题拆分，保证单块token不超限、不拆分完整章节
     :param full_text: 完整的文档全文本
-    :param max_chunk_tokens: 单块最大token数，预留20%余量给Prompt和模型输出
+    :param max_chunk_tokens: 单块最大token数，预留余量给Prompt和模型输出
     :param logger: 日志对象
+    :param model_name: 模型名称，用于精准token计数
     :return: 分块后的文本列表
     """
     try:
         # 硬件手册专属分块规则：优先按二级/三级章节拆分，保证章节完整性
         text_splitter = RecursiveCharacterTextSplitter(
             separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
-            chunk_size=max_chunk_tokens,  # 修复：直接传token上限，不再乘以3，与length_function单位完全匹配
-            chunk_overlap=300,  # 优化：块间上下文重叠提升至300，避免长文档章节上下文断裂
-            length_function=lambda x: count_tokens(x)
+            chunk_size=max_chunk_tokens,
+            chunk_overlap=300,
+            length_function=lambda x: count_tokens(x, model_name)
         )
         chunks = text_splitter.split_text(full_text)
         
         if logger:
             logger.info(f"📄 文档分块完成，共分为 {len(chunks)} 块，单块最大token上限: {max_chunk_tokens}")
             for i, chunk in enumerate(chunks):
-                logger.info(f"  第{i+1}块 token数: {count_tokens(chunk)}")
+                logger.info(f"  第{i+1}块 token数: {count_tokens(chunk, model_name)}")
         
         return chunks
-
     except Exception as e:
         if logger:
             logger.error(f"❌ 文档分块失败: {str(e)}，自动降级为单块解析模式", exc_info=True)
         # 异常兜底：返回原文本安全截断内容，保证程序正常运行
         safe_single_chunk = full_text[:max_chunk_tokens*3]
         if logger:
-            logger.warning(f"⚠️  降级单块token数: {count_tokens(safe_single_chunk)}")
+            logger.warning(f"⚠️  降级单块token数: {count_tokens(safe_single_chunk, model_name)}")
         return [safe_single_chunk]
 
 # ================= 多格式归档保存器 =================
-def save_archive_multi_format(content, base_name, config, logger):
-    """保存为 Markdown/Word/Excel 多种格式"""
+def save_archive_multi_format(content, base_name, config, logger, audit_report=None):
+    """
+    保存为 Markdown/Word/Excel 多种格式
+
+    Args:
+        content: 归档内容
+        base_name: 输出文件基础名称
+        config: 配置字典
+        logger: 日志对象
+        audit_report: 审核报告对象（可选）
+    """
     archive_root = config['archive'].get('archive_root_dir', 'output_archive')
     if config['archive'].get('use_timestamp_folder', True):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -427,62 +471,116 @@ def save_archive_multi_format(content, base_name, config, logger):
         except ImportError:
             logger.warning("⚠️ 未安装 pandas 库，跳过 CSV 生成。请运行: pip install pandas")
         except Exception as e:
-            logger.error(f"保存 CSV 失败: {e}")        
+            logger.error(f"保存 CSV 失败: {e}")
+
+    # 保存审核报告（如果有）
+    if audit_report is not None:
+        # JSON 格式
+        json_path = os.path.join(target_dir, "audit_report.json")
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                f.write(audit_report.to_json())
+            logger.info(f"✅ 审核报告(JSON) 已保存: {json_path}")
+            saved_files.append(json_path)
+        except Exception as e:
+            logger.error(f"保存审核报告(JSON) 失败: {e}")
+
+        # Markdown 格式
+        md_path = os.path.join(target_dir, "audit_report.md")
+        try:
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(audit_report.to_markdown())
+            logger.info(f"✅ 审核报告(MD) 已保存: {md_path}")
+            saved_files.append(md_path)
+        except Exception as e:
+            logger.error(f"保存审核报告(MD) 失败: {e}")
 
     return saved_files
 
 # ================= 核心业务逻辑 =================
-def process_document(config, input_file_path, output_base_name, logger):
-    """主处理流程"""
+def process_document(config, input_file_path, output_base_name, logger, enable_review=True):
+    """
+    主处理流程
+
+    Args:
+        config: 配置字典
+        input_file_path: 输入文件路径
+        output_base_name: 输出文件基础名称
+        logger: 日志对象
+        enable_review: 是否启用审核（默认True）
+    """
     start_time = time.time()
+
+    # 初始化状态管理器（如果模块可用）
+    state_manager = None
+    if AGENT_MODULES_AVAILABLE:
+        state_manager = StateManager()
+        logger.info("✅ Agent 模块已加载，启用状态管理和审核功能")
+    else:
+        logger.warning("⚠️ Agent 模块不可用，使用兼容模式运行")
+
+    # 最终生成的审核报告
+    audit_report = None
 
     try:
         with tqdm(total=100, desc="整体进度", bar_format='{l_bar}{bar}| {n_fmt}%') as pbar:
-            
+
             # 1. 智能加载文档
             pbar.set_description("正在读取文档")
             full_doc_text = load_document_smart(input_file_path, logger)
             if full_doc_text is None:
                 return False
+
+            # ★ 保存原文到状态管理器
+            if state_manager:
+                state_manager.store_original(full_doc_text, input_file_path)
+
             pbar.update(30)
 
             # 2. 初始化 LLM
             pbar.set_description("正在初始化 AI 模型")
             logger.info("正在连接 AI 服务...")
             try:
-                llm = ChatOpenAI(
-                    model=config['llm']['model_name'],
-                    api_key=config['llm']['api_key'],
-                    base_url=config['llm']['base_url'],
-                    temperature=config['llm']['temperature']
-                )
+                # 全参数透传，兼容所有OpenAI标准接口参数，100%兼容原有配置
+                llm_config = config['llm'].copy()
+                llm = ChatOpenAI(**llm_config)
             except Exception as e:
                 logger.error(f"AI 服务初始化失败: {e}")
                 return False
             pbar.update(10)
 
-                        # 3. 文档token统计与分块处理（解决长文档截断核心问题）
+            # 3. 文档token统计与分块处理（解决长文档截断核心问题）
             pbar.set_description("正在处理文档分块")
-            # 模型上下文安全上限：DeepSeek-chat 32k上下文，预留4k给Prompt和输出，单块最大28k token
-            max_single_chunk_tokens = 28000
-            total_tokens = count_tokens(full_doc_text)
-            logger.info(f"📄 文档总token数: {total_tokens}")
-            
+            # 从配置中读取模型名，适配token计数
+            used_model_name = config['llm'].get('model_name', 'deepseek-chat')
+            # 模型上下文安全上限：默认按128k上下文预留，可通过llm.max_tokens配置调整
+            max_context_tokens = config['llm'].get('max_tokens', 128000)
+            # 预留40%余量给Prompt和输出，避免上下文超限
+            max_single_chunk_tokens = int(max_context_tokens * 0.6)
+            total_tokens = count_tokens(full_doc_text, used_model_name)
+            logger.info(f"📄 文档总token数: {total_tokens}，单块安全上限: {max_single_chunk_tokens}")
+
             # 短文档直接走单块逻辑，无额外性能开销
             if total_tokens <= max_single_chunk_tokens:
                 document_chunks = [full_doc_text]
                 logger.info("✅ 文档长度在安全范围内，采用单块解析模式")
             # 长文档按章节智能分块解析
             else:
-                document_chunks = split_document_by_chapter(full_doc_text, max_single_chunk_tokens, logger)
+                document_chunks = split_document_by_chapter(full_doc_text, max_single_chunk_tokens, logger, used_model_name)
                 # 兜底：分块后仍有超上限的块，强制二次拆分，彻底杜绝超上限问题
                 for i, chunk in reversed(list(enumerate(document_chunks))):
-                    chunk_token = count_tokens(chunk)
+                    chunk_token = count_tokens(chunk, used_model_name)
                     if chunk_token > max_single_chunk_tokens:
                         logger.warning(f"⚠️  第{i+1}块token数{chunk_token}仍超上限，执行强制二次拆分")
-                        sub_chunks = split_document_by_chapter(chunk, max_single_chunk_tokens//2, logger)
+                        sub_chunks = split_document_by_chapter(chunk, max_single_chunk_tokens//2, logger, used_model_name)
                         document_chunks.pop(i)
                         document_chunks[i:i] = sub_chunks
+
+            # ★ 保存分块信息到状态管理器
+            if state_manager:
+                token_counts = [count_tokens(c, used_model_name) for c in document_chunks]
+                state_manager.set_chunks(document_chunks, token_counts)
+
             pbar.update(5)
 
             # 4. 构造强约束Prompt模板（彻底解决重复生成问题）
@@ -525,7 +623,7 @@ def process_document(config, input_file_path, output_base_name, logger):
             for chunk_index, chunk in enumerate(document_chunks):
                 chunk_start_time = time.time()
                 logger.info(f"▶️  正在解析第 {chunk_index+1}/{len(document_chunks)} 块")
-                
+
                 # 基于已合并的内容，生成当前块的Prompt
                 current_generated_content = rebuild_full_content(output_base_name, merged_chapter_dict)
                 current_prompt = base_prompt_template.format(
@@ -537,16 +635,20 @@ def process_document(config, input_file_path, output_base_name, logger):
                 try:
                     chunk_response = llm.invoke(current_prompt)
                     chunk_content = chunk_response.content.strip()
-                    
+
                     # 解析当前块生成的章节内容，增量合并到总字典中
                     chunk_chapter_dict = split_content_by_chapter(chunk_content)
                     merged_chapter_dict = merge_chapter_content(merged_chapter_dict, chunk_chapter_dict)
-                    
+
+                    # ★ 保存章节内容到状态管理器
+                    if state_manager:
+                        state_manager.merge_chapters(chunk_chapter_dict)
+
                     chunk_duration = time.time() - chunk_start_time
                     logger.info(f"✅ 第 {chunk_index+1}/{len(document_chunks)} 块解析完成，耗时: {chunk_duration:.2f}秒，新增/补充章节: {list(chunk_chapter_dict.keys())}")
                 except Exception as e:
                     logger.error(f"❌ 第 {chunk_index+1} 块解析失败: {str(e)}，跳过当前块继续解析", exc_info=True)
-                
+
                 # 进度条更新：分块解析占35%总进度，与原有进度条体系完全兼容
                 pbar.update(35 / len(document_chunks))
 
@@ -557,9 +659,34 @@ def process_document(config, input_file_path, output_base_name, logger):
             logger.info(f"AI 全部分块解析完成，总耗时: {ai_duration:.2f}秒，最终生成完整章节: {list(merged_chapter_dict.keys())}")
             pbar.update(5)
 
-            # 7. 多格式保存（修复：使用分块合并后的正确变量full_generated_content）
+            # ★ 7. 深度审核（如果启用且有状态管理器）
+            if enable_review and state_manager:
+                pbar.set_description("正在执行深度审核")
+                logger.info("=" * 50)
+                logger.info("🔍 开始深度审核...")
+
+                reviewer = DataReviewer(config, logger)
+                audit_report = reviewer.review(state_manager)
+
+                logger.info(f"📊 审核结果: {audit_report.get_summary()}")
+                logger.info(f"   - 总体得分: {audit_report.overall_score:.1%}")
+                logger.info(f"   - 是否通过: {'✅ 是' if audit_report.passed else '❌ 否'}")
+
+                # 严格模式：审核不通过则终止
+                review_config = config.get('review', {})
+                strict_mode = review_config.get('strict_mode', False)
+                if strict_mode and not audit_report.passed:
+                    logger.error("❌ 严格模式下审核未通过，终止输出")
+                    logger.error(f"   问题摘要: {audit_report.get_summary()}")
+                    return False
+
+                logger.info("=" * 50)
+            elif enable_review and not state_manager:
+                logger.warning("⚠️ 审核功能需要 Agent 模块，已跳过审核")
+
+            # 8. 多格式保存（修复：使用分块合并后的正确变量full_generated_content）
             pbar.set_description("正在保存归档文件")
-            saved_files = save_archive_multi_format(full_generated_content, output_base_name, config, logger)
+            saved_files = save_archive_multi_format(full_generated_content, output_base_name, config, logger, audit_report=audit_report)
             
             if saved_files:
                 pbar.update(10)
@@ -623,7 +750,26 @@ if __name__ == "__main__":
     
     logger.info(f"待解析文档: {input_file_path}")
     logger.info(f"输出文档基础名称: {final_output_base_name}")
-    
-    # 7. 运行主流程（修复后正确逻辑）
-    success = process_document(config, input_file_path, final_output_base_name, logger)
+
+    # ★ 7. 处理审核相关参数
+    review_config = config.get('review', {})
+    enable_review = review_config.get('enabled', True)
+
+    # 命令行参数覆盖配置文件
+    if args.enable_review:
+        enable_review = True
+    elif args.no_review:
+        enable_review = False
+
+    # 严格模式
+    if args.strict_review:
+        review_config['strict_mode'] = True
+        config['review'] = review_config
+
+    logger.info(f"审核功能: {'✅ 已启用' if enable_review else '❌ 已禁用'}")
+    if args.strict_review:
+        logger.info("审核模式: 严格模式（审核不通过则终止）")
+
+    # 8. 运行主流程
+    success = process_document(config, input_file_path, final_output_base_name, logger, enable_review=enable_review)
     sys.exit(0 if success else 1)
